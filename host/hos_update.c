@@ -104,6 +104,10 @@ void hos_update_check(void) {
     char have[128], builder[MAX_PATH * 3], skipped[128] = "", tag[128];
     _snwprintf(file, MAX_PATH + 64, L"%ls\\hookshot_version.txt", dir);
     if (!read_value(file, "version", have, sizeof have) || !safe_tag(have)) return;
+    /* A deliberate version pin must not trigger an unsolicited latest-release prompt. */
+    char policy[32] = "";
+    _snwprintf(file, MAX_PATH + 64, L"%ls\\user\\hookshot_update_policy.txt", dir);
+    if (read_value(file, "mode", policy, sizeof policy) && !strcmp(policy, "pinned")) return;
     _snwprintf(file, MAX_PATH + 64, L"%ls\\user\\hookshot_update_skip.txt", dir);
     read_value(file, "skip", skipped, sizeof skipped);
     if (!latest_tag(tag, sizeof tag)) {

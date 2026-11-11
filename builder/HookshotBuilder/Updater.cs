@@ -15,10 +15,39 @@ namespace HookshotBuilder;
 static class Updater
 {
     const string Latest = "https://api.github.com/repos/NotRexed/Hookshot/releases/latest";
+    const string Releases = "https://api.github.com/repos/NotRexed/Hookshot/releases?per_page=100";
     const string Asset = "HookshotBuilder.zip";
     const string SetupAsset = "HookshotBuilder.exe";            // (the setup, builder/setup/setup.c: a release holds it and its list)
     const string SetupList = "hookshot-setup.txt";              // (scripts/make_setup_parts.py)
     static readonly TimeSpan[] RetryDelays = { TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(6), TimeSpan.FromSeconds(12), TimeSpan.FromSeconds(20) };
+
+    // The installer offers only published stable releases with a Windows setup and manifest.
+    public static async Task<List<string>> ReleaseTags()
+    {
+        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
+        http.DefaultRequestHeaders.UserAgent.ParseAdd("HookshotBuilder");
+        using var request = new HttpRequestMessage(HttpMethod.Get, Releases);
+        request.Headers.Accept.ParseAdd("application/vnd.github+json");
+        using var response = await http.SendAsync(request);
+        response.EnsureSuccessStatusCode();
+        using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        var tags = new List<string>();
+        foreach (var release in document.RootElement.EnumerateArray())
+        {
+            if (release.GetProperty("draft").GetBoolean() || release.GetProperty("prerelease").GetBoolean()) continue;
+            var tag = release.GetProperty("tag_name").GetString();
+            if (tag == null || !ValidTag(tag)) continue;
+            var assets = release.GetProperty("assets").EnumerateArray().Select(a => a.GetProperty("name").GetString()).ToHashSet();
+            if (assets.Contains(SetupAsset) && assets.Contains(SetupList)) tags.Add(tag);
+        }
+        return tags;
+    }
+
+    static bool ValidTag(string tag) => tag.Length is >= 1 and <= 128 &&
+        char.IsLetterOrDigit(tag[0]) && tag.All(c => char.IsAsciiLetterOrDigit(c) || c is '.' or '-' or '_');
+
+    static string ReleaseUrl(string? tag) => tag == null ? Latest :
+        "https://api.github.com/repos/NotRexed/Hookshot/releases/tags/" + Uri.EscapeDataString(tag);
 
     public static void FromCommandLine(MainWindow w)
     {
@@ -140,7 +169,8 @@ static class Updater
             string? digest = null, setupDigest = null;
             long size = 0, setupSize = 0;
             var hasList = false;
-            using (var response = await GetWithRetries(w, http, Latest, token, "application/vnd.github+json", TimeSpan.FromSeconds(30)))
+            if (tag != null && !ValidTag(tag)) throw new InvalidOperationException("Invalid release tag.");
+            using (var response = await GetWithRetries(w, http, ReleaseUrl(tag), token, "application/vnd.github+json", TimeSpan.FromSeconds(30)))
             using (var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(token)))
             {
                 newTag = doc.RootElement.GetProperty("tag_name").GetString();
@@ -164,7 +194,8 @@ static class Updater
                     else if (assetName == SetupList) hasList = true;
                 }
             }
-            if (newTag == null || (url == null && setupUrl == null)) throw new InvalidOperationException("The latest release has no " + Asset + ".");
+            if (newTag == null || (url == null && setupUrl == null)) throw new InvalidOperationException("This release has no Windows builder assets.");
+            if (tag != null && newTag != tag) throw new InvalidOperationException($"GitHub returned {newTag}, not the requested {tag}.");
             if (newTag == tools.Version)
             {
                 w.UpdateBuild(tools, folder);
