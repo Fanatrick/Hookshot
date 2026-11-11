@@ -308,6 +308,13 @@
           <TextBlock x:Name="LaunchVersion" Style="{StaticResource Sub}" HorizontalAlignment="Center" TextAlignment="Center" Margin="0,8,0,0"/>
           <TextBlock x:Name="LaunchStatus" FontSize="13" Foreground="{StaticResource InkSoft}" Text="Checking for updates…"
                      HorizontalAlignment="Center" Margin="0,16,0,0"/>
+          <StackPanel Margin="0,18,0,0" Width="330">
+            <TextBlock Text="INSTALL / SWITCH VERSION" Style="{StaticResource Label}" Margin="0,0,0,7"/>
+            <ComboBox x:Name="LaunchVersions" Height="36" SelectionChanged="LaunchVersionChanged"
+                      ToolTip="Select a published stable release or the installed build"/>
+            <CheckBox x:Name="LaunchPinVersion" Content="Stay on the selected version" Margin="0,12,0,0"
+                      Checked="LaunchPinChanged" Unchecked="LaunchPinChanged"/>
+          </StackPanel>
           <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,28,0,0">
             <Button x:Name="LaunchUpdate" Style="{StaticResource Primary}" Height="50" Padding="26,0" Margin="0,0,12,0" Content="Update"
                     Visibility="Collapsed" Click="LaunchUpdateClick"/>

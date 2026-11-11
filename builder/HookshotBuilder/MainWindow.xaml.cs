@@ -187,6 +187,8 @@ public partial class MainWindow : Window
 
     // ---- the launcher: Hookshot Launcher.exe in a game folder starts this with --launch <folder> (builder/setup/setup.c) ----
     string launchFolder = "";
+    bool launchVersionsReady;
+    string? launchReleaseError;
 
     static string? LaunchArg()
     {
@@ -204,19 +206,57 @@ public partial class MainWindow : Window
         LaunchVersion.Text = (game != null ? $"Hookshot {game}" : "Hookshot") + " · " + folder;
         LaunchPlay.IsEnabled = File.Exists(GameExe(folder));
         ShowPage(LaunchPage);
-        latestTag = Environment.GetEnvironmentVariable("HOOKSHOT_LATEST_TAG") is { Length: > 0 } fake ? (fake == "none" ? null : fake) : await Updater.LatestTag(Track);
-        updateTarget = Updater.Target(latestTag, Tools.Find()?.Version, Track);   // (GitHub's newest, else this builder's own)
-        if (updateTarget == null) LaunchStatus.Text = "Could not check for updates (GitHub did not answer)";
-        else if (game != null && game != updateTarget && GameVersion(folder) != null)
+        launchVersionsReady = false;
+        launchReleaseError = null;
+        LaunchUpdate.Visibility = Visibility.Collapsed;
+        var pinned = VersionPolicy.PinnedTag(folder);
+        LaunchPinVersion.IsChecked = pinned != null;
+        latestTag = Environment.GetEnvironmentVariable("HOOKSHOT_LATEST_TAG") is { Length: > 0 } fake
+            ? (fake == "none" ? null : fake) : await Updater.LatestTag(Track);
+        updateTarget = Updater.Target(latestTag, Tools.Find()?.Version, Track);
+        try
         {
-            LaunchStatus.Text = $"Update available: {updateTarget}";
-            LaunchStatus.Foreground = new SolidColorBrush(Color.FromRgb(0xB9, 0xC8, 0xFF));
-            LaunchStatus.FontWeight = FontWeights.SemiBold;
-            LaunchUpdate.Visibility = Visibility.Visible;
+            var versions = await Updater.ReleaseTags();
+            if (updateTarget != null && !versions.Contains(updateTarget)) versions.Insert(0, updateTarget);
+            if (game != null && !versions.Contains(game)) versions.Add(game);
+            if (pinned != null && !versions.Contains(pinned)) versions.Add(pinned);
+            LaunchVersions.ItemsSource = versions;
+            LaunchVersions.SelectedItem = pinned ?? updateTarget ?? game ?? versions.FirstOrDefault();
         }
-        else if (game != null && game != updateTarget)
-            LaunchStatus.Text = $"{updateTarget} is out: build this folder again with the Hookshot Builder to get it";
-        else LaunchStatus.Text = latestTag == null ? "Up to date with this builder (GitHub did not answer)" : "Up to date";
+        catch (Exception error)
+        {
+            launchReleaseError = $"Cannot load releases: {error.Message}";
+            LaunchVersions.ItemsSource = game == null ? Array.Empty<string>() : new[] { game };
+            LaunchVersions.SelectedItem = game;
+        }
+        launchVersionsReady = true;
+        RefreshLaunchSelection();
+    }
+
+    void RefreshLaunchSelection()
+    {
+        if (!launchVersionsReady) return;
+        var game = GameVersion(launchFolder) ?? ReadVersion(launchFolder);
+        var selected = LaunchVersions.SelectedItem as string;
+        LaunchUpdate.Visibility = selected != null && game != selected && GameVersion(launchFolder) != null
+            ? Visibility.Visible : Visibility.Collapsed;
+        LaunchUpdate.Content = "Switch version";
+        if (selected == null) LaunchStatus.Text = launchReleaseError ?? "No releases were found";
+        else if (game == selected) LaunchStatus.Text = launchReleaseError ?? $"{selected} is installed";
+        else if (GameVersion(launchFolder) == null) LaunchStatus.Text = "This installation has no game sources saved for rebuilding";
+        else LaunchStatus.Text = $"Switch {game ?? "unknown"} to {selected}: the game will be rebuilt";
+    }
+
+    void LaunchVersionChanged(object sender, SelectionChangedEventArgs e) => RefreshLaunchSelection();
+
+    void LaunchPinChanged(object sender, RoutedEventArgs e)
+    {
+        if (!launchVersionsReady) return;
+        var game = GameVersion(launchFolder) ?? ReadVersion(launchFolder);
+        var selected = LaunchVersions.SelectedItem as string;
+        // Apply immediately only to the currently installed game. Switching versions confirms first.
+        if (selected != null && selected == game)
+            VersionPolicy.SetPinnedTag(launchFolder, LaunchPinVersion.IsChecked == true ? selected : null);
     }
 
     /// (a folder built before it kept its game files has a version too: only shown)
@@ -248,7 +288,23 @@ public partial class MainWindow : Window
 
     void LaunchUpdateClick(object sender, RoutedEventArgs e)
     {
-        if (OlderOk(GameVersion(launchFolder))) Updater.UpdateFolder(this, launchFolder, updateTarget, fetched: false, named: Switching);
+        var selected = LaunchVersions.SelectedItem as string;
+        if (selected == null || selected == (GameVersion(launchFolder) ?? ReadVersion(launchFolder))) return;
+        if (GameVersion(launchFolder) == null) return;
+        if (MessageBox.Show(this,
+            $"Switch to {selected}? Hookshot will rebuild the game. Your saves and settings will be backed up first.",
+            "Switch Hookshot version", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes) return;
+        try
+        {
+            VersionPolicy.BackupBeforeSwitch(launchFolder);
+            VersionPolicy.SetPinnedTag(launchFolder, LaunchPinVersion.IsChecked == true ? selected : null);
+        }
+        catch (Exception error)
+        {
+            MessageBox.Show(this, $"Cannot prepare the version switch: {error.Message}", "Hookshot", MessageBoxButton.OK, MessageBoxImage.Error);
+            return;
+        }
+        Updater.UpdateFolder(this, launchFolder, selected, fetched: false, named: true);
     }
 
     // ---- the update track (Updater.cs): the one chosen in the Track menu, saved; by default these tools' own ----

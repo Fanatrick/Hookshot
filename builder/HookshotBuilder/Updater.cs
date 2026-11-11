@@ -20,6 +20,32 @@ static class Updater
     const string SetupList = "hookshot-setup.txt";              // (scripts/make_setup_parts.py)
     static readonly TimeSpan[] RetryDelays = { TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(6), TimeSpan.FromSeconds(12), TimeSpan.FromSeconds(20) };
 
+    /// <summary>Published stable versions with downloadable Windows builder packages.</summary>
+    public static async Task<List<string>> ReleaseTags()
+    {
+        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
+        http.DefaultRequestHeaders.UserAgent.ParseAdd("HookshotBuilder");
+        using var request = new HttpRequestMessage(HttpMethod.Get, Releases + "?per_page=100");
+        request.Headers.Accept.ParseAdd("application/vnd.github+json");
+        using var response = await http.SendAsync(request);
+        response.EnsureSuccessStatusCode();
+        using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        var tags = new List<string>();
+        foreach (var release in doc.RootElement.EnumerateArray())
+        {
+            if (release.GetProperty("draft").GetBoolean() || release.GetProperty("prerelease").GetBoolean()) continue;
+            var tag = release.GetProperty("tag_name").GetString();
+            if (tag == null || !ValidTag(tag)) continue;
+            var assets = release.GetProperty("assets").EnumerateArray()
+                .Select(asset => asset.GetProperty("name").GetString()).ToHashSet();
+            if (assets.Contains(SetupAsset) && assets.Contains(SetupList)) tags.Add(tag);
+        }
+        return tags;
+    }
+
+    static bool ValidTag(string tag) => tag.Length is >= 1 and <= 128 &&
+        char.IsAsciiLetterOrDigit(tag[0]) && tag.All(c => char.IsAsciiLetterOrDigit(c) || c is '.' or '-' or '_');
+
     public static void FromCommandLine(MainWindow w)
     {
         var a = Environment.GetCommandLineArgs();
@@ -32,7 +58,7 @@ static class Updater
             else if (a[i] == "--fetched") fetched = true;
         }
         if (folder == null) return;
-        UpdateFolder(w, folder, tag, fetched);
+        UpdateFolder(w, folder, tag, fetched, named: tag != null);
     }
 
     // ---- the update tracks (the Track menu; by default the track of these tools). host/hos_update.c and
@@ -233,7 +259,8 @@ static class Updater
             string? digest = null, setupDigest = null;
             long size = 0, setupSize = 0;
             var hasList = false;
-            // (another track's build, or one a switch of track asked for: that release; the nightly's is named by its list's tag)
+            if (named && tag != null && !ValidTag(tag)) throw new InvalidOperationException("Invalid release tag.");
+            // Ordinary track updates keep their existing behavior. A manually chosen version is exact.
             var api = named && tag != null ? Releases + "/tags/" + ReleaseOf(tag) : ReleaseApi(tag);
             using (var response = await GetWithRetries(w, http, api, token, "application/vnd.github+json", TimeSpan.FromSeconds(30)))
             using (var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(token)))
@@ -260,7 +287,9 @@ static class Updater
                     else if (assetName == SetupList) hasList = true;
                 }
             }
-            if (newTag == null || (url == null && setupUrl == null)) throw new InvalidOperationException("The latest release has no " + Asset + ".");
+            if (newTag == null || (url == null && setupUrl == null)) throw new InvalidOperationException("The requested release has no Windows builder assets.");
+            if (named && tag != null && newTag != tag)
+                throw new InvalidOperationException($"GitHub returned {newTag}, not the requested {tag}.");
             if (newTag == tools.Version)
             {
                 w.UpdateBuild(tools, folder);
