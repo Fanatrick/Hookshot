@@ -138,8 +138,8 @@ def read_the_window(source):
     since = re.search(r'public const string Since = "(v\d+\.\d+\.\d+)";', policy)
     check(since, "VersionPolicy.Since is not a release's name")
     if since:
-        for doc in ("docs/versioning.md", "CONTRIBUTING.md"):
-            check("`%s`" % since.group(1) in (source / doc).read_text(encoding="utf-8"),
+        for doc, named in (("docs/versioning.md", "`%s`"), ("CONTRIBUTING.md", "`%s`"), ("readme.md", "from %s on")):
+            check(named % since.group(1) in (source / doc).read_text(encoding="utf-8"),
                   "%s does not name %s, the first release with the version list (VersionPolicy.Since)" % (doc, since.group(1)))
     # the pin's file is the one the game reads (tests/test_version_pin.py has the game's side)
     check('File.WriteAllText(policy, $"mode=pinned\\nversion={tag}\\n");' in policy and
