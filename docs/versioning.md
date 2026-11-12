@@ -22,8 +22,8 @@ so they never carry different versions.
 
 The "public" surface the rules protect is the command line of `make_game.py` and the builder, the `RX_` and `HOS_`
 switches, the files a build writes into a game folder (`hookshot_options.ini`, `hookshot_env.txt`, `language.txt`,
-`hookshot_version.txt`), saves, and the format of `hookshot_log.txt`. The C sources and internal headers are not an
-API and may change in any release.
+`hookshot_version.txt`), saves, the launcher's pin beside them (`user\hookshot_update_policy.txt`, below), and the format
+of `hookshot_log.txt`. The C sources and internal headers are not an API and may change in any release.
 
 ## Pull request titles decide the version
 
@@ -231,6 +231,51 @@ own update check (`host/hos_update.c`) follows the track of the folder's version
 `builder/HookshotBuilder/Updater.cs`, `builder/linux/linux_update.py` and `tests/test_update_tracks.py`. A release
 candidate's and the nightly's `HookshotBuilder.exe` are built with `HOOKSHOT_SETUP_RELEASE`, so started with no `--tag`
 they install their own release (`builder/setup/setup.c`).
+
+## Staying on a version, and switching to another
+
+The Windows builder's launcher page has a **Version** list and a **Stay on** tick
+(`builder/HookshotBuilder/VersionPolicy.cs`), from `v2.2.0` on. The Linux builder has neither yet.
+
+![The launcher's Version list, opened: the track's newest, a release between and the version installed](images/windows-launcher-versions.png)
+![A release picked to switch to, with Stay on ticked for it](images/windows-launcher-switch.png)
+
+The pictures are the published Windows builder run under Wine on Linux, with authored versions (`HOOKSHOT_LATEST_TAG`,
+`HOOKSHOT_RELEASE_TAGS`) and an authored game folder with no game in it. They show the page. They are not a Windows
+window, and nothing was downloaded or built for them.
+
+**The pin.** The tick writes `user\hookshot_update_policy.txt` in the game folder, beside the saves, where every build
+leaves it:
+
+```
+mode=pinned
+version=v2.2.0
+```
+
+It holds only while that is the version installed. The launcher then opens on that version with no update offered,
+and the game's own check (`host/hos_update.c`, for a game started without its launcher) asks GitHub nothing and logs
+`update: this folder stays on v2.2.0`. A file that names another version is as none. The builder removes it when a
+build leaves the folder on another version, so going back to that version later does not bring the pin back unasked.
+A game built before `v2.2.0` does not read the file: its launcher keeps to the pin, but started on its own it still
+asks, and the tick's tooltip says so.
+
+**The list.** It holds the update track's newest version, the version installed, and the releases from `v2.2.0` on
+that were published with the setup and its list: GitHub's release list, asked for when the list is opened (a page of a
+hundred at a time, ten at most), not at every start of the launcher. Picking the track's newest is the update as it
+always was. Any other is a switch: the launcher asks, copies the saves and settings (the game folder's `user\save`
+and the files beside it, `hookshot_options.ini`, `hookshot_env.txt` and `language.txt`) to
+`<the builder's folder>\version-backups\<game folder>\<time> <from> to <to>`, keeps the newest five, and starts the
+update for that release by name. The builder that builds it is started with `--pin` beside `--update <folder> --tag
+<version> --fetched` when **Stay on** was ticked for it, and writes the pin once its build ends well. Nothing is
+written before: a download or a build that fails leaves the folder, and its pin, as they were.
+
+**Why no release before `v2.2.0`.** A switch installs that release's own builder, which then is the folder's launcher.
+One from before the list has no list to come back from and no pin, so it offers its update again at every start. The
+setups of `v2.0.0` to `v2.0.5` take no `--tag`: asked for their own release they install the latest, and the update
+stops at "The update installed ..., not ...". And no builder before `v2.2.0` knows a portable builder's folder
+([docs/windows-portable-builder.md](windows-portable-builder.md)). The first release with the list is
+`VersionPolicy.Since` in the code: if the list ships in a later release than `v2.2.0`, that constant and this section
+change with it.
 
 ## The files of a release
 

@@ -216,8 +216,6 @@ public partial class MainWindow : Window
 
     // ---- the launcher: Hookshot Launcher.exe in a game folder starts this with --launch <folder> (builder/setup/setup.c) ----
     string launchFolder = "";
-    bool launchVersionsReady;
-    string? launchReleaseError;
 
     static string? LaunchArg()
     {
@@ -235,57 +233,127 @@ public partial class MainWindow : Window
         LaunchVersion.Text = (game != null ? $"Hookshot {game}" : "Hookshot") + " · " + folder;
         LaunchPlay.IsEnabled = File.Exists(GameExe(folder));
         ShowPage(LaunchPage);
-        launchVersionsReady = false;
-        launchReleaseError = null;
-        LaunchUpdate.Visibility = Visibility.Collapsed;
-        var pinned = VersionPolicy.PinnedTag(folder);
-        LaunchPinVersion.IsChecked = pinned != null;
-        latestTag = Environment.GetEnvironmentVariable("HOOKSHOT_LATEST_TAG") is { Length: > 0 } fake
-            ? (fake == "none" ? null : fake) : await Updater.LatestTag(Track);
-        updateTarget = Updater.Target(latestTag, Tools.Find()?.Version, Track);
+        latestTag = Environment.GetEnvironmentVariable("HOOKSHOT_LATEST_TAG") is { Length: > 0 } fake ? (fake == "none" ? null : fake) : await Updater.LatestTag(Track);
+        updateTarget = Updater.Target(latestTag, Tools.Find()?.Version, Track);   // (GitHub's newest, else this builder's own)
+        // (the version list, VersionPolicy.cs: only in a folder that keeps its game files, which a version is built from. It
+        // opens on the track's newest, so the page is the one it was, or on the version installed when the player stays on it)
+        var rebuildable = GameVersion(folder) != null;
+        launchReleases = null;
+        launchPinFor = null;
+        LaunchVersionsNote.Text = "";
+        LaunchVersionPanel.Visibility = rebuildable ? Visibility.Visible : Visibility.Collapsed;
+        FillLaunchVersions(VersionPolicy.Preselected(game, rebuildable, updateTarget, VersionPolicy.Pinned(folder, game)));
+    }
+
+    // ---- the launcher's version list and "Stay on this version" (VersionPolicy.cs has the rules) ----
+
+    /// One line of the list
+    sealed record VersionChoice(string Tag, string Text)
+    {
+        public override string ToString() => Text;
+    }
+
+    List<string>? launchReleases;   // (the releases GitHub listed, once the list was opened: Updater.ReleaseTags)
+    bool launchListing, launchFilling;
+    string? launchPinFor;           // (the version the tick was last shown for: RefreshLaunch)
+
+    string? LaunchPickedTag => (LaunchVersions.SelectedItem as VersionChoice)?.Tag;
+
+    /// The list: the version installed, the track's newest and, once asked for, the releases between; pick is chosen in it
+    void FillLaunchVersions(string? pick)
+    {
+        var game = GameVersion(launchFolder) ?? ReadVersion(launchFolder);
+        var choices = VersionPolicy.Offered(game, updateTarget, launchReleases ?? Enumerable.Empty<string>())
+            .Select(tag => new VersionChoice(tag, tag == game ? $"{tag} (installed)" : tag == updateTarget ? $"{tag} (newest)" : tag)).ToList();
+        launchFilling = true;   // (one RefreshLaunch for the list as it ends up, not one for each step of filling it)
+        LaunchVersions.ItemsSource = choices;
+        LaunchVersions.SelectedItem = choices.FirstOrDefault(c => c.Tag == pick) ?? choices.FirstOrDefault(c => c.Tag == game);
+        launchFilling = false;
+        RefreshLaunch();
+    }
+
+    /// The status line, the button and the tick for the version picked. With the track's newest picked, as when the launcher
+    /// opens, they are what they were before there was a list: "Update available" and Update, or "Up to date"
+    void RefreshLaunch()
+    {
+        if (launchFilling) return;
+        var game = GameVersion(launchFolder) ?? ReadVersion(launchFolder);
+        var rebuildable = GameVersion(launchFolder) != null;
+        var picked = LaunchPickedTag;
+        var step = VersionPolicy.StepFor(game, rebuildable, updateTarget, picked);
+        var pinned = rebuildable && VersionPolicy.Pinned(launchFolder, game);   // (the tick is only shown for a folder that can be built)
+        var newer = updateTarget != null && game != null && game != updateTarget;   // (another version is out)
+        LaunchStatus.Text =
+            step == VersionPolicy.Step.Switch ? $"Switch to {picked}: this folder is built again with that version"
+            : pinned && picked == game ? (newer ? $"Staying on {game} ({updateTarget} is out)" : $"Staying on {game}")
+            : updateTarget == null ? "Could not check for updates (GitHub did not answer)"
+            : step == VersionPolicy.Step.Update ? $"Update available: {updateTarget}"
+            : newer && !rebuildable ? $"{updateTarget} is out: build this folder again with the Hookshot Builder to get it"
+            : newer ? $"{game} is installed ({updateTarget} is out)"
+            : latestTag == null ? "Up to date with this builder (GitHub did not answer)" : "Up to date";
+        var update = step == VersionPolicy.Step.Update;
+        LaunchStatus.Foreground = update ? new SolidColorBrush(Color.FromRgb(0xB9, 0xC8, 0xFF)) : (Brush)FindResource("InkSoft");
+        LaunchStatus.FontWeight = update ? FontWeights.SemiBold : FontWeights.Normal;
+        LaunchUpdate.Content = step == VersionPolicy.Step.Switch ? "Switch version" : "Update";
+        LaunchUpdate.Visibility = step == VersionPolicy.Step.None ? Visibility.Collapsed : Visibility.Visible;
+        // (the tick names its version: the one picked to switch to, else the one installed, so on the page of an update that
+        // is out it is "not this update". For the version installed it says what the folder's file says; for a switch it is a
+        // wish, LaunchSwitch, and starts unticked each time another version is picked)
+        var pinFor = VersionPolicy.PinSubject(game, rebuildable, updateTarget, picked);
+        LaunchPin.Content = $"Stay on {pinFor}";
+        if (pinFor == game) LaunchPin.IsChecked = pinned;
+        else if (pinFor != launchPinFor) LaunchPin.IsChecked = false;
+        launchPinFor = pinFor;
+        LaunchPin.ToolTip = "Ticked, no update is offered for this game folder while it is on that version." +
+            (pinFor == game && VersionPolicy.GameAsksAnyway(game)
+                ? $" The game itself still asks when it is started without this launcher: it was built before {VersionPolicy.Since}." : "");
+    }
+
+    void LaunchVersionChanged(object sender, SelectionChangedEventArgs e) => RefreshLaunch();
+
+    /// The list opened: the releases to switch to are asked for now, once (again at the next opening when GitHub did not
+    /// answer). Not when the launcher starts: its start asks GitHub one question, as before, and Update needs no list
+    async void LaunchVersionsOpened(object? sender, EventArgs e)
+    {
+        if (launchReleases != null || launchListing) return;
+        launchListing = true;
+        LaunchVersionsNote.Text = "Asking GitHub for the releases…";
+        var folder = launchFolder;
         try
         {
-            var versions = await Updater.ReleaseTags();
-            if (updateTarget != null && !versions.Contains(updateTarget)) versions.Insert(0, updateTarget);
-            if (game != null && !versions.Contains(game)) versions.Add(game);
-            if (pinned != null && !versions.Contains(pinned)) versions.Add(pinned);
-            LaunchVersions.ItemsSource = versions;
-            LaunchVersions.SelectedItem = pinned ?? updateTarget ?? game ?? versions.FirstOrDefault();
+            // (development) HOOKSHOT_RELEASE_TAGS=v2.3.0,v2.2.0: the list without GitHub, as HOOKSHOT_LATEST_TAG is the newest. The
+            // releases as given, also ones from before the list: to try a switch while no two releases have the list yet
+            var found = Environment.GetEnvironmentVariable("HOOKSHOT_RELEASE_TAGS") is { Length: > 0 } fake
+                ? fake.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Where(Updater.IsRelease).Distinct().ToList()
+                : await Updater.ReleaseTags(VersionPolicy.Since);
+            if (folder != launchFolder) return;
+            launchReleases = found;
+            var game = GameVersion(folder) ?? ReadVersion(folder);
+            FillLaunchVersions(LaunchPickedTag);
+            LaunchVersionsNote.Text = found.Any(tag => tag != game && tag != updateTarget) ? ""
+                : $"No other release yet: the list has those from {VersionPolicy.Since} on.";
         }
         catch (Exception error)
         {
-            launchReleaseError = $"Cannot load releases: {error.Message}";
-            LaunchVersions.ItemsSource = game == null ? Array.Empty<string>() : new[] { game };
-            LaunchVersions.SelectedItem = game;
+            LaunchVersionsNote.Text = "The releases could not be listed: " +
+                (error is System.Net.Http.HttpRequestException ? error.Message : "GitHub did not answer.") + " Open the list again to retry.";
         }
-        launchVersionsReady = true;
-        RefreshLaunchSelection();
+        finally { launchListing = false; }
     }
 
-    void RefreshLaunchSelection()
+    /// The tick, pressed. For the version installed it is kept at once (the pin: user\hookshot_update_policy.txt), and the
+    /// page goes to what that means: the version installed with no update offered, or the track's newest again. For a
+    /// version to switch to it is only read when the switch starts, and kept once that version is built (LaunchSwitch)
+    void LaunchPinClick(object sender, RoutedEventArgs e)
     {
-        if (!launchVersionsReady) return;
-        var game = GameVersion(launchFolder) ?? ReadVersion(launchFolder);
-        var selected = LaunchVersions.SelectedItem as string;
-        LaunchUpdate.Visibility = selected != null && game != selected && GameVersion(launchFolder) != null
-            ? Visibility.Visible : Visibility.Collapsed;
-        LaunchUpdate.Content = "Switch version";
-        if (selected == null) LaunchStatus.Text = launchReleaseError ?? "No releases were found";
-        else if (game == selected) LaunchStatus.Text = launchReleaseError ?? $"{selected} is installed";
-        else if (GameVersion(launchFolder) == null) LaunchStatus.Text = "This installation has no game sources saved for rebuilding";
-        else LaunchStatus.Text = $"Switch {game ?? "unknown"} to {selected}: the game will be rebuilt";
-    }
-
-    void LaunchVersionChanged(object sender, SelectionChangedEventArgs e) => RefreshLaunchSelection();
-
-    void LaunchPinChanged(object sender, RoutedEventArgs e)
-    {
-        if (!launchVersionsReady) return;
-        var game = GameVersion(launchFolder) ?? ReadVersion(launchFolder);
-        var selected = LaunchVersions.SelectedItem as string;
-        // Apply immediately only to the currently installed game. Switching versions confirms first.
-        if (selected != null && selected == game)
-            VersionPolicy.SetPinnedTag(launchFolder, LaunchPinVersion.IsChecked == true ? selected : null);
+        var game = GameVersion(launchFolder);
+        if (game == null || VersionPolicy.PinSubject(game, true, updateTarget, LaunchPickedTag) != game) return;
+        try { VersionPolicy.SetPinnedTag(launchFolder, LaunchPin.IsChecked == true ? game : null); }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            MessageBox.Show(this, $"This could not be saved in the game folder's user folder: {error.Message}", "Hookshot");
+        }
+        FillLaunchVersions(VersionPolicy.Preselected(game, true, updateTarget, VersionPolicy.Pinned(launchFolder, game)));
     }
 
     /// (a folder built before it kept its game files has a version too: only shown)
@@ -317,23 +385,43 @@ public partial class MainWindow : Window
 
     void LaunchUpdateClick(object sender, RoutedEventArgs e)
     {
-        var selected = LaunchVersions.SelectedItem as string;
-        if (selected == null || selected == (GameVersion(launchFolder) ?? ReadVersion(launchFolder))) return;
-        if (GameVersion(launchFolder) == null) return;
-        if (MessageBox.Show(this,
-            $"Switch to {selected}? Hookshot will rebuild the game. Your saves and settings will be backed up first.",
-            "Switch Hookshot version", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes) return;
+        var game = GameVersion(launchFolder);
+        switch (VersionPolicy.StepFor(game, game != null, updateTarget, LaunchPickedTag))
+        {
+            case VersionPolicy.Step.Update:   // (the track's newest: the update as it was before there was a list)
+                if (OlderOk(GameVersion(launchFolder))) Updater.UpdateFolder(this, launchFolder, updateTarget, fetched: false, named: Switching);
+                break;
+            case VersionPolicy.Step.Switch:
+                LaunchSwitch(game!, LaunchPickedTag!);
+                break;
+        }
+    }
+
+    /// Another version than the track's newest, picked in the list: asked first, the saves and settings copied, and then
+    /// the update's own way to that release by name (Updater.UpdateFolder: its builder is downloaded, and builds the
+    /// folder again from the game files it keeps). The folder and its pin stay as they are until that build ends well
+    void LaunchSwitch(string game, string tag)
+    {
+        var pin = LaunchPin.IsChecked == true;   // (ticked for the version picked: RefreshLaunch)
+        var copies = VersionPolicy.BackupHome(launchFolder);
+        var text = $"Switch this game from {game} to {tag}?\n\n" +
+                   $"Hookshot Builder downloads {tag} and builds this game folder again with it, from the game files the folder keeps. " +
+                   "That takes about as long as an update. Your game stays as it is until the new one is complete.\n\n" +
+                   (Updater.Newer(game, tag) ? $"{tag} is older than {game}, the version you have now: it may not read saves or settings {game} wrote. " : "") +
+                   $"Your saves and settings are copied first, to a new folder in\n{copies}\n(the newest {VersionPolicy.Backups} copies are kept)." +
+                   (pin ? $"\n\nThe game then stays on {tag}: no update is offered until you untick \"Stay on {tag}\"." : "");
+        if (MessageBox.Show(this, text, "Hookshot", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
         try
         {
-            VersionPolicy.BackupBeforeSwitch(launchFolder);
-            VersionPolicy.SetPinnedTag(launchFolder, LaunchPinVersion.IsChecked == true ? selected : null);
+            AddLog("saves and settings copied to " + VersionPolicy.Backup(launchFolder, game, tag));
         }
-        catch (Exception error)
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
         {
-            MessageBox.Show(this, $"Cannot prepare the version switch: {error.Message}", "Hookshot", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show(this, $"Your saves and settings could not be copied to {copies}: {error.Message}\n\nNothing was changed.", "Hookshot",
+                            MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
         }
-        Updater.UpdateFolder(this, launchFolder, selected, fetched: false, named: true);
+        Updater.UpdateFolder(this, launchFolder, tag, fetched: false, named: true, pin: pin);
     }
 
     // ---- the update track (Updater.cs): the one chosen in the Track menu, saved; by default these tools' own ----
@@ -1055,6 +1143,7 @@ public partial class MainWindow : Window
         if (!keepRows)
         {
             updating = false;
+            pinWhenBuilt = false;   // (a build from game files, not an update: no update's wish is its own)
             MakeRows(update: false, shaders: prepareNow);
             SetStep(1);
             BuildTitle.Text = "Building your game";
@@ -1225,8 +1314,13 @@ public partial class MainWindow : Window
         clock.Stop();
         elapsed.Stop();
         runner = null;
+        var pin = pinWhenBuilt;
+        pinWhenBuilt = false;   // (asked for this build alone: one that stopped keeps nothing, and the next is not this one)
         if (finished.Length > 0)
         {
+            // (the folder is on another version now, or the same: its pin follows. VersionPolicy.Settle)
+            try { VersionPolicy.Settle(finished, ReadVersion(finished), pin); }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { AddLog("the version to stay on could not be saved: " + e.Message); }
             foreach (var (id, r) in rows)
             {
                 if (id != ShaderStep.Id) r.Done();
@@ -1273,6 +1367,7 @@ public partial class MainWindow : Window
         ReadyTitle.Text = updating ? "Your game is updated" : "Your game is ready";
         var compiledNote = thisCompile > 0 ? $" (compiled in {Span(TimeSpan.FromSeconds(thisCompile))})" : "";
         ReadyNote.Text = $"{(updating ? "Updated" : "Built")} in {Span(elapsed.Elapsed)}{compiledNote}{Against(builtIn ?? elapsed.Elapsed)} · {finished}";
+        if (ReadVersion(finished) is { } now && VersionPolicy.Pinned(finished, now)) ReadyNote.Text += $" · stays on {now}";
         if (!updating && Environment.GetEnvironmentVariable("HOOKSHOT_UI_PREVIEW") == null)
             Finder.Shortcuts(finished, DesktopTick.IsChecked == true, StartTick.IsChecked == true);
         else if (updating && Environment.GetEnvironmentVariable("HOOKSHOT_UI_PREVIEW") == null)
@@ -1433,9 +1528,15 @@ public partial class MainWindow : Window
 
     CancellationTokenSource? download;
 
-    public void BeginUpdate(string folder, string? tag)
+    /// "Stay on this version" asked for with the update that runs (the launcher's tick, or --pin from the builder that
+    /// handed the build over: Updater.PinAsked). Kept when that update's build ends well, Ended; every update sets it,
+    /// so one that asked for none never inherits another's
+    bool pinWhenBuilt;
+
+    public void BeginUpdate(string folder, string? tag, bool pin = false)
     {
         updating = true;
+        pinWhenBuilt = pin;
         OutPath.Text = folder;
         finished = "";
         var to = tag ?? "the latest version";

@@ -2,7 +2,8 @@
    when it is not the release this game folder was built with, the player is asked whether to update. Yes starts the Hookshot Builder
    that made the folder (hookshot_version.txt, written by nx2/make_game.py) with --update: it downloads the new release and builds the
    folder again from the game files the folder keeps, and the game closes. A folder with no hookshot_version.txt (built from the
-   repository, or before updates came in) is never asked about. HOOKSHOT_NO_UPDATE_CHECK=1 (hookshot_env.txt) turns it off */
+   repository, or before updates came in) is never asked about. HOOKSHOT_NO_UPDATE_CHECK=1 (hookshot_env.txt) turns it off, and
+   on Windows a folder its launcher was told to stay on a version is not asked about while it is on that version (pinned_here) */
 #if defined(_WIN32) || defined(__linux__)
 #include <ctype.h>
 #include <stdlib.h>
@@ -176,6 +177,23 @@ static int latest_tag(const char *have, char *tag, size_t cap) {
     return ok;
 }
 
+/* (hookshot) The launcher's "Stay on <version>" (builder/HookshotBuilder/VersionPolicy.cs, its tick on the launcher page):
+   user\hookshot_update_policy.txt beside the saves, "mode=pinned" and "version=<the version to stay on>". It holds only
+   while that is the version installed: a file left from another version (the folder was built again since) is as none, and
+   the offer is made as before. Windows only: the Linux builder has no version list, and its launcher asks in its own window */
+static int pin_holds(const char *mode, const char *pinned, const char *have) {
+    return !strcmp(mode, "pinned") && *pinned && !strcmp(pinned, have);
+}
+
+static int pinned_here(const wchar_t *dir, const char *have) {
+    wchar_t file[MAX_PATH + 64];
+    char mode[32] = "", pinned[128] = "";
+    _snwprintf(file, MAX_PATH + 64, L"%ls\\user\\hookshot_update_policy.txt", dir);
+    read_value(file, "mode", mode, sizeof mode);
+    read_value(file, "version", pinned, sizeof pinned);
+    return pin_holds(mode, pinned, have);
+}
+
 /* Portable metadata permits one constant launcher in the owning game folder, never a cwd/PATH lookup. */
 static int local_builder(const wchar_t *file, const wchar_t *dir, wchar_t *out, size_t cap) {
     char local[8];
@@ -197,11 +215,10 @@ void hos_update_check(void) {
     char have[128], builder[MAX_PATH * 3], skipped[128] = "", tag[128];
     _snwprintf(file, MAX_PATH + 64, L"%ls\\hookshot_version.txt", dir);
     if (!read_value(file, "version", have, sizeof have) || !safe_tag(have)) return;
-    /* A pin only suppresses updates while that precise version is installed. */
-    char policy[32] = "", pinned[128] = "";
-    _snwprintf(file, MAX_PATH + 64, L"%ls\\user\\hookshot_update_policy.txt", dir);
-    if (read_value(file, "mode", policy, sizeof policy) && !strcmp(policy, "pinned") &&
-        read_value(file, "version", pinned, sizeof pinned) && !strcmp(pinned, have)) return;
+    if (pinned_here(dir, have)) {   /* (before GitHub is asked: a folder that stays on its version needs no answer) */
+        fprintf(stderr, "update: this folder stays on %s (the launcher's \"Stay on %s\"): no update is offered\n", have, have);
+        return;
+    }
     _snwprintf(file, MAX_PATH + 64, L"%ls\\user\\hookshot_update_skip.txt", dir);
     read_value(file, "skip", skipped, sizeof skipped);
     if (!latest_tag(have, tag, sizeof tag)) {

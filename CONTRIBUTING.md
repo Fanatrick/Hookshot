@@ -163,6 +163,25 @@ Its **Build memory** choice is saved with the build's other settings, and the up
 `HOOKSHOT_MEM_LIMIT_GB` for that build: the compilers may then reserve that much together, whatever is free now. The
 compilers that always run (up to 4 on Windows) still run under a smaller number.
 
+The launcher page (the builder opened by a game folder's `hookshot.exe`, `--launch <folder>`) has a **Version** list and
+a **Stay on** tick, for a folder that keeps its game files. Their rules are in `VersionPolicy.cs`, with no window in it,
+and `tests/test_launcher_versions.py` runs them:
+
+- The list opens on the update track's newest version, so the page and **Update** are what they were. Any other
+  release in it is a switch: asked first, the saves and settings copied to
+  `<the builder's folder>\version-backups\<game folder>` (the newest five kept), then the update's own way to that
+  release by name.
+- It offers the releases from `v2.2.0` on (`VersionPolicy.Since`), the first with the list, and asks GitHub for them
+  only when it is opened: the launcher's start costs one question, as before.
+- The tick is the pin, `user\hookshot_update_policy.txt` in the game folder: no update is offered while the folder is
+  on that version, by the launcher or by the game (`host/hos_update.c`). A switch's pin is written when its build ends
+  well, not before.
+
+To see the page's states without a release to test against, set `HOOKSHOT_LATEST_TAG` (the newest version, or `none`
+for a GitHub that does not answer) and `HOOKSHOT_RELEASE_TAGS` (the list, comma-separated: `v2.3.0,v2.2.0`) for the
+builder, and start it with `--launch <game folder>`. The list is taken as given, a release from before `v2.2.0` too:
+that is the way to try a real switch while no two releases have the list yet.
+
 ## Building
 
 | Command | What it does |

@@ -154,6 +154,19 @@ folder. The build files of the last build are gone by then (see [Where the files
 update takes about as long as the first build. Your saves and settings are kept. What changed is on the
 [Releases page](https://github.com/NotRexed/Hookshot/releases).
 
+On Windows the launcher also has a **Version** list and a **Stay on** tick, from v2.2.0 on:
+
+- **To stay on the version you have**, tick **Stay on v...**. No update is offered for that game folder, by the
+  launcher or by the game, until you untick it.
+- **To go to another release than the newest**, pick it in the **Version** list and press **Switch version**. The
+  launcher asks first, copies your saves and settings (below), and builds the game again with that release, which takes
+  as long as an update. Tick **Stay on** for it before you press, and the game stays there. The list has the releases
+  from v2.2.0 on: an earlier one has no list to come back from, and would offer its update again at every start.
+
+Before a switch your saves and settings are copied to a new folder in
+`%LOCALAPPDATA%\HookshotBuilder\version-backups` (a portable builder: in its own folder), one folder a game folder; the
+newest five copies are kept. To use one, copy its files back into the game folder.
+
 <details>
 <summary>What an update keeps and replaces, and updating from the command line</summary>
 

@@ -20,32 +20,6 @@ static class Updater
     const string SetupList = "hookshot-setup.txt";              // (scripts/make_setup_parts.py)
     static readonly TimeSpan[] RetryDelays = { TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(6), TimeSpan.FromSeconds(12), TimeSpan.FromSeconds(20) };
 
-    /// <summary>Published stable versions with downloadable Windows builder packages.</summary>
-    public static async Task<List<string>> ReleaseTags()
-    {
-        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
-        http.DefaultRequestHeaders.UserAgent.ParseAdd("HookshotBuilder");
-        using var request = new HttpRequestMessage(HttpMethod.Get, Releases + "?per_page=100");
-        request.Headers.Accept.ParseAdd("application/vnd.github+json");
-        using var response = await http.SendAsync(request);
-        response.EnsureSuccessStatusCode();
-        using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
-        var tags = new List<string>();
-        foreach (var release in doc.RootElement.EnumerateArray())
-        {
-            if (release.GetProperty("draft").GetBoolean() || release.GetProperty("prerelease").GetBoolean()) continue;
-            var tag = release.GetProperty("tag_name").GetString();
-            if (tag == null || !ValidTag(tag)) continue;
-            var assets = release.GetProperty("assets").EnumerateArray()
-                .Select(asset => asset.GetProperty("name").GetString()).ToHashSet();
-            if (assets.Contains(SetupAsset) && assets.Contains(SetupList)) tags.Add(tag);
-        }
-        return tags;
-    }
-
-    static bool ValidTag(string tag) => tag.Length is >= 1 and <= 128 &&
-        char.IsAsciiLetterOrDigit(tag[0]) && tag.All(c => char.IsAsciiLetterOrDigit(c) || c is '.' or '-' or '_');
-
     public static void FromCommandLine(MainWindow w)
     {
         var a = Environment.GetCommandLineArgs();
@@ -58,8 +32,13 @@ static class Updater
             else if (a[i] == "--fetched") fetched = true;
         }
         if (folder == null) return;
-        UpdateFolder(w, folder, tag, fetched, named: tag != null);
+        UpdateFolder(w, folder, tag, fetched, pin: PinAsked);
     }
+
+    /// --pin beside --update: the folder stays on the version it is built as, once that build ends well (the launcher's
+    /// "Stay on this version" ticked for a switch to it: MainWindow.Ended, VersionPolicy.Settle). Handed on with the rest
+    /// (Handover) when the build is another builder's to do
+    public static bool PinAsked => Environment.GetCommandLineArgs().Contains("--pin");
 
     // ---- the update tracks (the Track menu; by default the track of these tools). host/hos_update.c and
     // builder/linux/linux_update.py have the same rules ----
@@ -150,6 +129,54 @@ static class Updater
     /// The API address of the release a target is on: the latest release for a release (as before), else that tag's
     static string ReleaseApi(string? tag) => tag == null || TrackOf(tag) == Release ? Latest : Releases + "/tags/" + ReleaseOf(tag);
 
+    // ---- the launcher's version list (MainWindow.xaml.cs, VersionPolicy.cs) ----
+    const int ReleasePage = 100, ReleasePages = 10;   // (GitHub's most a page, and how many are asked for at most)
+
+    /// A release's name, vX.Y.Z: not a release candidate's, a nightly's or any other tag. (the whole text: .NET's $ also
+    /// matches before a last line break)
+    public static bool IsRelease(string? tag) =>
+        tag != null && ReleaseName.Match(tag) is { Success: true } m && m.Length == tag.Length && !m.Groups[4].Success;
+
+    /// The releases the launcher's version list offers, newest first: vX.Y.Z from since on, each published with the setup
+    /// and its list (what installs its builder by version). Asked for when the player opens the list, not at every start
+    /// of the launcher, and a page of 100 at a time: GitHub's list holds the release candidates, the nightly and the parts
+    /// releases too, and passes 100 within weeks. Throws when GitHub does not answer (the API's limit is 60 an hour a PC):
+    /// the launcher's update check does not use this list, so its Update stays
+    public static async Task<List<string>> ReleaseTags(string since)
+    {
+        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
+        http.DefaultRequestHeaders.UserAgent.ParseAdd("HookshotBuilder");
+        var tags = new List<string>();
+        for (var page = 1; page <= ReleasePages; page++)
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, $"{Releases}?per_page={ReleasePage}&page={page}");
+            request.Headers.Accept.ParseAdd("application/vnd.github+json");
+            using var response = await http.SendAsync(request);
+            if (!response.IsSuccessStatusCode) throw HttpFailure(response);
+            using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            var listed = 0;
+            var older = false;
+            foreach (var release in doc.RootElement.EnumerateArray())
+            {
+                listed++;
+                if (!release.TryGetProperty("tag_name", out var name) || name.GetString() is not { } tag || !IsRelease(tag)) continue;
+                if (Is(release, "draft") || Is(release, "prerelease")) continue;
+                if (Newer(since, tag)) { older = true; continue; }
+                var assets = new HashSet<string?>();
+                if (release.TryGetProperty("assets", out var files) && files.ValueKind == JsonValueKind.Array)
+                    foreach (var file in files.EnumerateArray())
+                        if (file.TryGetProperty("name", out var fileName)) assets.Add(fileName.GetString());
+                if (assets.Contains(SetupAsset) && assets.Contains(SetupList) && !tags.Contains(tag)) tags.Add(tag);
+            }
+            // (GitHub lists the newest first: past a release older than since, or a page that is not full, nothing is left to offer)
+            if (older || listed < ReleasePage) break;
+        }
+        tags.Sort((a, b) => Newer(a, b) ? -1 : Newer(b, a) ? 1 : 0);
+        return tags;
+    }
+
+    static bool Is(JsonElement release, string flag) => release.TryGetProperty(flag, out var value) && value.ValueKind == JsonValueKind.True;
+
     /// The latest release's tag, quietly (null: GitHub did not answer); a few tries, 20 s at most
     public static async Task<string?> LatestTag()
     {
@@ -227,9 +254,9 @@ static class Updater
 
     /// The game in folder built again with the latest release: here when these tools are it (or fetched), else after the setup
     /// installed it (it starts the new builder with --update folder --tag t --fetched)
-    public static async void UpdateFolder(MainWindow w, string folder, string? tag, bool fetched, bool named = false)
+    public static async void UpdateFolder(MainWindow w, string folder, string? tag, bool fetched, bool named = false, bool pin = false)
     {
-        w.BeginUpdate(folder, tag);
+        w.BeginUpdate(folder, tag, pin);
         var tools = Tools.Find();
         if (tools == null)
         {
@@ -260,8 +287,7 @@ static class Updater
             string? digest = null, setupDigest = null;
             long size = 0, setupSize = 0;
             var hasList = false;
-            if (named && tag != null && !ValidTag(tag)) throw new InvalidOperationException("Invalid release tag.");
-            // Ordinary track updates keep their existing behavior. A manually chosen version is exact.
+            // (another track's build, or one a switch of track asked for: that release; the nightly's is named by its list's tag)
             var api = named && tag != null ? Releases + "/tags/" + ReleaseOf(tag) : ReleaseApi(tag);
             using (var response = await GetWithRetries(w, http, api, token, "application/vnd.github+json", TimeSpan.FromSeconds(30)))
             using (var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(token)))
@@ -288,9 +314,11 @@ static class Updater
                     else if (assetName == SetupList) hasList = true;
                 }
             }
-            if (newTag == null || (url == null && setupUrl == null)) throw new InvalidOperationException("The requested release has no Windows builder assets.");
+            if (newTag == null || (url == null && setupUrl == null)) throw new InvalidOperationException("The latest release has no " + Asset + ".");
+            // (a release asked for by name, in the launcher's version list or by a switch of track: that one or none. Another
+            // one GitHub answered with would be built over the folder as the version picked)
             if (named && tag != null && newTag != tag)
-                throw new InvalidOperationException($"GitHub returned {newTag}, not the requested {tag}.");
+                throw new InvalidOperationException($"GitHub answered with {newTag}, not {tag}, the version asked for.");
             if (newTag == tools.Version)
             {
                 w.UpdateBuild(tools, folder);
@@ -311,7 +339,7 @@ static class Updater
                 var setup = Path.Combine(cache, SetupAsset);
                 await DownloadWithRetries(w, http, setupUrl, setupApiUrl, setup, setupSize, setupDigest, token);
                 var ssi = new ProcessStartInfo(setup) { UseShellExecute = false, WorkingDirectory = cache };
-                foreach (var arg in new[] { "--update", folder, "--tag", newTag, "--fetched" }) ssi.ArgumentList.Add(arg);
+                foreach (var arg in Handover(folder, newTag, pin)) ssi.ArgumentList.Add(arg);
                 BuilderHome.PassTo(ssi);
                 Process.Start(ssi);
                 Application.Current.Shutdown();
@@ -341,7 +369,7 @@ static class Updater
             var exe = Path.Combine(target, "HookshotBuilder.exe");
             if (!File.Exists(exe)) throw new FileNotFoundException("The download has no HookshotBuilder.exe (your antivirus may have removed it).");
             var si = new ProcessStartInfo(exe) { UseShellExecute = false, WorkingDirectory = target };
-            foreach (var arg in new[] { "--update", folder, "--tag", newTag, "--fetched" }) si.ArgumentList.Add(arg);
+            foreach (var arg in Handover(folder, newTag, pin)) si.ArgumentList.Add(arg);
             BuilderHome.PassTo(si);
             Process.Start(si);
             Application.Current.Shutdown();
@@ -355,6 +383,12 @@ static class Updater
             w.DownloadFailed(e.Message + " Your game folder is unchanged; you can also download the new version from GitHub yourself.");
         }
     }
+
+    /// What the new builder is started with, by its setup (which passes its arguments on) or as it is: the folder to build
+    /// again, as which release, and that its tools are here. --pin when the folder is to stay on that version (PinAsked): a
+    /// builder from before the pin takes no notice of it, and the list offers none (VersionPolicy.Since)
+    static string[] Handover(string folder, string tag, bool pin) =>
+        pin ? new[] { "--update", folder, "--tag", tag, "--fetched", "--pin" } : new[] { "--update", folder, "--tag", tag, "--fetched" };
 
     static async Task<HttpResponseMessage> GetWithRetries(MainWindow w, HttpClient http, string url, CancellationToken token,
         string? accept = null, TimeSpan? timeout = null)
