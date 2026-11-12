@@ -21,7 +21,7 @@ SOURCE = ROOT / "nx2/make_game.py"
 
 def production():
     tree = ast.parse(SOURCE.read_text(encoding="utf-8"), filename=str(SOURCE))
-    helpers = {"say", "fail", "gen_print", "write_lift_key", "lifted_before"}
+    helpers = {"say", "fail", "gen_print", "write_lift_key", "lifted_before", "kept_before", "kept_list_fits"}
     definitions = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in helpers]
     assert {node.name for node in definitions} == helpers
     key = next(node for node in tree.body if isinstance(node, ast.Assign) and
@@ -48,7 +48,9 @@ class LiftCleanupErrorTests(unittest.TestCase):
         self.key = self.gen / ".lift_key"
         self.events = []
         self.namespace, self.branch = production()
-        self.namespace.update(work=str(self.work), exefs=str(self.root / "exefs"), env={}, key="b" * 40, PY=["authored-python"])
+        self.namespace.update(work=str(self.work), exefs=str(self.root / "exefs"), env={}, key="b" * 40, PY=["authored-python"],
+                              gen_dir=str(self.gen), KEPT_LIST="lifted_objects.txt", KEPT_SCHEME=1,
+                              kept_lift=[], contextlib=contextlib)
         self.actual_write = self.namespace["write_lift_key"]
 
         def write_key(work, key):
@@ -66,7 +68,12 @@ class LiftCleanupErrorTests(unittest.TestCase):
             (self.gen / "a64_table.c").write_text("/* authored table */\n", encoding="utf-8")
             (self.image / "image.bin").write_bytes(b"authored image sentinel")
 
-        self.namespace.update(run=run, write_lift_key=write_key)
+        def rekey(exefs, work, env):   # (the key taken again after the lift, from what the next build reads: hot_pieces.txt)
+            self.assertEqual((exefs, work, env), (str(self.root / "exefs"), str(self.work), {}))
+            self.events.append("rekey")
+            return "b" * 40
+
+        self.namespace.update(run=run, write_lift_key=write_key, lift_key=rekey)
 
     def seed(self, same_key=False):
         self.gen.mkdir(parents=True)
@@ -140,7 +147,7 @@ class LiftCleanupErrorTests(unittest.TestCase):
 
         self.namespace["run"] = run
         self.exercise()
-        self.assertEqual(self.events, ["lift", "key"])
+        self.assertEqual(self.events, ["lift", "rekey", "key"])
         self.assertTrue(self.namespace["lifted_before"](str(self.work), "b" * 40))
         for path, data in protected.items():
             self.assertEqual(path.read_bytes(), data)
@@ -158,7 +165,7 @@ class LiftCleanupErrorTests(unittest.TestCase):
 
         with mock.patch.object(os, "remove", side_effect=delete):
             self.exercise()
-        self.assertEqual(self.events, ["lift", "key"])
+        self.assertEqual(self.events, ["lift", "rekey", "key"])
         self.assertTrue(self.namespace["lifted_before"](str(self.work), "b" * 40))
 
     def test_matching_cached_lift_is_not_cleared(self):
@@ -171,7 +178,7 @@ class LiftCleanupErrorTests(unittest.TestCase):
 
     def test_first_lift_without_generated_directory(self):
         self.exercise()
-        self.assertEqual(self.events, ["lift", "key"])
+        self.assertEqual(self.events, ["lift", "rekey", "key"])
         self.assertTrue(self.namespace["lifted_before"](str(self.work), "b" * 40))
 
     def test_failed_lift_leaves_no_fresh_key(self):
