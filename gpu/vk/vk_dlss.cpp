@@ -96,6 +96,9 @@ struct State {
     // (the preset, output and HDR a creation failed for: not tried again each frame, but once any of them changes, so the
     // menu's DLSS rows bring DLSS back without a restart. 0: none failed)
     uint64_t refused = 0;
+    // (the last evaluation's result, and how many times in a row it failed that way: what its log line is spaced by)
+    NVSDK_NGX_Result eval_result = NVSDK_NGX_Result_Success;
+    uint64_t eval_repeats = 0;
 };
 State& st() {
     static State s;
@@ -380,7 +383,9 @@ int prepare(VkCommandBuffer cmd, uint32_t rw, uint32_t rh, uint32_t ow, uint32_t
             logf("vk: NVIDIA DLSS: the render size %ux%u is a little outside quality mode %d's range (%ux%u to %ux%u): taken by "
                  "it (a rounded size)", rw, rh, (int)mode, ranges[k].min_w, ranges[k].min_h, ranges[k].max_w, ranges[k].max_h);
     }
-    const uint64_t key = (uint64_t)ow << 44 ^ (uint64_t)oh << 24 ^ (uint64_t)preset << 1 ^ (hdr ? 1 : 0) ^ 1ull << 63;
+    // (the quality mode with them: the Render resolution row asks for another feature of the same output)
+    const uint64_t key = (uint64_t)ow << 44 ^ (uint64_t)oh << 24 ^ (uint64_t)((int)mode & 7) << 8 ^ (uint64_t)preset << 1 ^
+                         (hdr ? 1 : 0) ^ 1ull << 63;
     if (s.refused == key) return *fail = "its feature was not made", 0;
     if (s.feature) {   // (the old one, once a new one is to be made)
         NVSDK_NGX_Handle* old = s.feature;
@@ -430,6 +435,7 @@ int prepare(VkCommandBuffer cmd, uint32_t rw, uint32_t rh, uint32_t ow, uint32_t
 
 bool start() { return ngx_init(); }
 
+void release();
 bool evaluate(VkCommandBuffer cmd, const TemporalFrame& f) {
     State& s = st();
     NVSDK_NGX_Resource_VK color = resource(f.color, false), depth = resource(f.depth, false), mv = resource(f.motion, false),
@@ -454,14 +460,25 @@ bool evaluate(VkCommandBuffer cmd, const TemporalFrame& f) {
     const NVSDK_NGX_Result r = NGX_VULKAN_EVALUATE_DLSS_EXT(cmd, s.feature, s.params, &ep);
     note_work();   // (as at its creation: the barrier after it, and the game's next one, are recorded)
     if (NVSDK_NGX_FAILED(r)) {
-        logf("vk: NVIDIA DLSS: its evaluation failed (%#x)", (unsigned)r);
+        // (the chain tries again at the next frame, kEngine's retry: one that keeps failing says so when its result changes
+        // and every 600th time, as the chain's own reason does, not on every frame)
+        if (r != s.eval_result || ++s.eval_repeats % 600 == 0)
+            logf("vk: NVIDIA DLSS: its evaluation failed (%#x)", (unsigned)r);
+        if (r != s.eval_result) s.eval_result = r, s.eval_repeats = 0;
+        // (half a second of them in a row: the feature is let go once, and prepare makes a new one for the next frame)
+        if (s.eval_repeats == 30) {
+            logf("vk: NVIDIA DLSS: 30 evaluations in a row failed: its feature is made again");
+            release();
+        }
         return false;
     }
+    s.eval_result = NVSDK_NGX_Result_Success;
     return true;
 }
 
 void release() {
     State& s = st();
+    s.refused = 0;   // (another engine chosen, or the chain idle: DLSS asked again makes its feature again)
     if (!s.feature) return;
     NVSDK_NGX_Handle* old = s.feature;
     temporal_later([old] { NVSDK_NGX_VULKAN_ReleaseFeature(old); });
@@ -515,6 +532,8 @@ void dlss_device_extensions(std::vector<const char*>& want, const std::vector<Vk
     if (!both) g_why = DLSS_NEEDS_RTX;
 }
 
+void dlss_retry() { st().refused = 0; }
+
 void dlss_probe() {
     if (dlss_why() != DLSS_OK || g_why.load(std::memory_order_relaxed) >= 0 || !dev.device) return;
     ngx_init();
@@ -562,6 +581,9 @@ struct Fg {
     // (read without mu, each present: a feature held (dlss_fg_idle), and NGX's answer a no or its feature given up after
     // three failed creations or kFgRefusalsOff refused sets in a row (dlss_fg_runs))
     std::atomic<bool> held{false}, start_failed{false};
+    // (read without mu, each present: `most` once NGX has answered (fg_start), 0 before. A multiplier that asks for more is
+    // the renderer's own to make (dlss_fg_frames), so the swapchain is not made for DLSS-G: dlss_fg_runs)
+    std::atomic<unsigned> most_known{0};
     // this frame's inputs (dlss_fg_inputs): the depth and motion copied, the camera NGX's way
     FgImage depth, motion;
     uint32_t rw = 0, rh = 0;
@@ -668,6 +690,9 @@ bool fg_start(Fg& g) {
         return false;
     }
     g.most = most ? most : 1;
+    // (RX_VK_DLSS_FG_MOST=<n>, for checks: no more than n, as an older runtime that makes 1 frame at most)
+    if (const char* cap = getenv("RX_VK_DLSS_FG_MOST"); cap && atoi(cap) >= 1 && (unsigned)atoi(cap) < g.most)
+        g.most = (unsigned)atoi(cap);
     // (its runtime: NGX takes the newest nvngx_dlssg in the runtime folders, else the driver's own copy, which may be older
     // and make 1 frame at most, or refuse every set. scripts/ngx_sdk.py puts the SDK's beside DLSS's runtime)
     // (Linux: NGX loads it by its real path, ASCII only, as DLSS's runtime: one only in folders named otherwise is not used)
@@ -695,6 +720,7 @@ bool fg_start(Fg& g) {
                      ": the driver's own, which may be older (scripts/ngx_sdk.py fetches it)";
     logf("vk: DLSS Frame Gen (NGX): available, up to %u made frames between two of the game's (%s)", g.most, runtime.c_str());
     g.ok = true;
+    g.most_known = g.most;
     g.start_failed = false;
     return true;
 }
@@ -774,7 +800,15 @@ void fg_release(Fg& g) {
 
 bool dlss_fg_wanted() { return fg_asked(); }
 
-bool dlss_fg_runs() { return fg_asked() && dlss_why() == DLSS_OK && !fgs().start_failed.load(std::memory_order_relaxed); }
+bool dlss_fg_runs(int frames) {
+    if (!fg_asked() || dlss_why() != DLSS_OK) return false;
+    const Fg& g = fgs();
+    if (g.start_failed.load(std::memory_order_relaxed)) return false;
+    // (more frames a set than its runtime makes: the renderer's own makes them all (dlss_fg_frames' too_many). Known once
+    // NGX has answered, at the first present with a fixed multiplier; until then it is taken to make them)
+    const unsigned most = g.most_known.load(std::memory_order_relaxed);
+    return !most || frames <= (int)most;
+}
 
 void dlss_fg_device_extensions(std::vector<const char*>& want, const std::vector<VkExtensionProperties>& all) {
     if (!fg_possible() || !dev.instance || !dev.physical) return;   // (whenever it may run: the row then needs no restart)
@@ -918,7 +952,7 @@ int dlss_fg_frames(VkCommandBuffer cmd, VkImage color, VkImageView color_view, u
         if (!told) {
             told = true;
             logf("vk: DLSS Frame Gen (NGX): %d made frames asked, but its runtime makes %u at most (an older %s?): the "
-                 "renderer's own makes them", count, g.most, kFgRuntime);
+                 "renderer's own makes them, and V-Sync Auto keeps its mode without DLSS-G", count, g.most, kFgRuntime);
         }
         return g.too_many++, 0;
     }
@@ -1087,10 +1121,11 @@ void dlss_fg_close() {
 bool dlss_built() { return false; }
 const TemporalEngine* dlss_engine() { return nullptr; }
 void dlss_probe() {}
+void dlss_retry() {}
 void dlss_instance_extensions(std::vector<const char*>&, const std::vector<VkExtensionProperties>&) {}
 void dlss_device_extensions(std::vector<const char*>&, const std::vector<VkExtensionProperties>&) {}
 bool dlss_fg_wanted() { return false; }
-bool dlss_fg_runs() { return false; }
+bool dlss_fg_runs(int) { return false; }
 void dlss_fg_device_extensions(std::vector<const char*>&, const std::vector<VkExtensionProperties>&) {}
 void dlss_fg_inputs(VkCommandBuffer, const TemporalFrame&, const float*, const float*, const float*, bool) {}
 int dlss_fg_frames(VkCommandBuffer, VkImage, VkImageView, uint32_t, uint32_t, int, const VkImage*, const VkImageView*, bool,
